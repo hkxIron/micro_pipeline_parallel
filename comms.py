@@ -2,18 +2,31 @@ import torch
 import torch.distributed as dist
 import os
 
-def init_distributed(rank, world_size, local_rank):
+def init_distributed():
     """
-    Standard PyTorch boilerplate to set up the process group.
-    These variables are usually set by torchrun or slurm
+    Initializes the distributed process group.
+    Reads state directly from environment variables set by torchrun.
     """
-    # Map the process to a specific GPU
-    torch.cuda.set_device(local_rank)
+    # 1. Read Environment Variables (set by torchrun)
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+
+    # 2. Set Device
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     
-    # Initialize the group (NCCL is the backend for NVIDIA GPUs)
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    # 3. Initialize Group
+    if torch.cuda.is_available():
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    else:        
+        dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
     
-    return rank, world_size
+    return rank, world_size, device
 
 class PipelineComms:
     def __init__(self, rank, world_size):
