@@ -1,3 +1,18 @@
+'''Imagine main.py is a sheet of music.
+
+torchrun is the conductor.
+
+The Processes are 4 different musicians.
+
+The conductor hands the same sheet of music to all 4 musicians.
+
+local_rank is the instruction at the top of the sheet:
+
+Musician 1's sheet says: "You are playing the Violin (GPU 0)."
+
+Musician 2's sheet says: "You are playing the Viola (GPU 1)."
+
+They all read the same notes (code), but they play on different instruments (GPUs) because of that initial setup instruction.'''
 import torch
 import torch.optim as optim
 import time

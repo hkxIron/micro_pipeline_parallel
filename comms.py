@@ -19,18 +19,21 @@ def init_distributed():
     elif torch.backends.mps.is_available():
         # >>> torch.device("mps")
         # device(type='mps')
-        device = torch.device("mps")
+        # device = torch.device("mps")
+        # mps doesn't work :(
+        device = torch.device("cpu")
     elif torch.cpu.is_available():
         device = torch.device("cpu")
     else:
         exit()
-    
     # 3. Initialize Group
     if torch.cuda.is_available():
-        # Crucial: Pin this process to a specific GPU
-        torch.cuda.set_device(local_rank)
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     else:        
+        # The code dist.init_process_group(...) is a Global State Setter.
+        #  It initializes the background communication threads (C++ NCCL backend).
+        # It sets up the "phone lines" so Process 0 can send data to Process 1.
+        # Once called, this state persists until the program ends or you call destroy_process_group().
         dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
     
     return rank, world_size, device
