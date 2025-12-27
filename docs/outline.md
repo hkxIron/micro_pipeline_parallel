@@ -34,17 +34,17 @@ Cut the `nn.Sequential` into two pieces: `part1` and `part2`.
   - _Run command:_ `torchrun --nproc_per_node=2 lab_pingpong.py`
 
 
-#### [The Naive Solution](/material/naive.md):
+#### [The Naive Solution](/docs/naive.md):
 
 - **Concept:** Stop-and-wait execution.
 - **Lab:** Implement the Naive Schedule. Measure utilization using nvidia-smi if cuda is available.
 
-#### [GPipe](/material/gpipe.md):
+#### [GPipe](/docs/gpipe.md):
 
 - **Concept:** Changing the loop from "Batch" to "Chunks."
 - **Lab:** GPipe (Fill -> Drain).
 
-#### [1F1B](/material/1f1b.md):
+#### [1F1B](/docs/1f1b.md):
 
 - **Concept:** Interleaving Chunks.
 - **Lab:** 1F1B (Steady State).
