@@ -49,7 +49,6 @@ for step in range(STEPS):
     loss = model(fixed_input, fixed_target)
     loss.backward()
     optimizer.step()
-    
     if step % 5 == 0:
         print(f"Step {step} | Loss: {loss:.4f}")
 
