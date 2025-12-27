@@ -1,5 +1,3 @@
-import torch
-
 def naive_pipeline_step(model, comms, batch, targets, hidden_dim, device):
     """
     A single training step using the Naive (Stop-and-Wait) schedule.
@@ -10,22 +8,28 @@ def naive_pipeline_step(model, comms, batch, targets, hidden_dim, device):
     # A. Get Input
     if comms.rank == 0:
         # Rank 0 gets the data directly from the dataloader
-        input_data = batch.to(device)
+        input_data = batch
     else:
+        # we need the shape here, but not for above because 
+        # the first device just gets the data straight from 
+        # the data loader and doesn't need to receive 
+        # with a buffer that it makes
+        shape = (batch, hidden_dim)
         # Others wait to receive from the left
-        batch_size = batch.shape[0] if batch is not None else 32 # Mock size
-        shape = (batch_size, hidden_dim)
         input_data = comms.recv_forward(shape, device)
-        # TEACHING MOMENT: In real PP, we need autograd to track this input tensor!
+        # Because we set requires_grad = True, the engine
+        # continues the chain rule all the way back to that input tensor
+        # Without this, the tensor would be treated as a constant by autograd and
+        # input_data.grad would be None so upstream model parameters wouldn’t update
+        # In real PP, autograd tracks this input tensor
         input_data.requires_grad = True
 
     # B. Compute
-    output = model(input_data, targets.to(device) if comms.rank == comms.world_size -1 else None)
+    output = model(input_data, targets if comms.rank == comms.world_size -1 else None)
 
-    # C. Send Output
+    # C. Send data to the right
     if not model.is_last:
-        comms.send_forward(output.detach()) # Send data to the right
-        # We store 'output' and 'input_data' because we need them for backward pass
+        comms.send_forward(output.detach())
         
     # --- PHASE 2: BACKWARD PASS ---
     
@@ -37,11 +41,15 @@ def naive_pipeline_step(model, comms, batch, targets, hidden_dim, device):
     else:
         # Receive gradients coming from the right
         grad_from_next = comms.recv_backward(output.shape, device)
-        
         # B. Compute Local Gradients
         # This is the "Backprop" step connecting the received grad to our weights
         output.backward(grad_from_next)
         grad_to_send = input_data.grad
+        '''
+        ( ∂Weights/∂Loss ): calculates how to change its own internal layers.
+        Input Gradients: If Rank 0 is the very first layer (taking in the raw data/images), it
+        technically calculates the gradient with respect to the raw input, but we
+        discard this because we can't "update" the training data!'''
 
     # C. Send Gradients
     if not model.is_first:
@@ -113,3 +121,5 @@ def gpipe_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device
             comms.send_backward(grad_to_send)
             
     return total_loss / chunks
+
+# def 1f1b

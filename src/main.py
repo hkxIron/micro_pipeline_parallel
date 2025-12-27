@@ -18,7 +18,7 @@ import torch
 import torch.optim as optim
 import time
 
-# Import your modules
+# Import our modules
 from comms import init_distributed, PipelineComms
 from model import ShardedMLP
 from schedule import naive_pipeline_step
@@ -27,7 +27,7 @@ from schedule import naive_pipeline_step
 BATCH_SIZE = 32
 HIDDEN_DIM = 128
 LAYERS_TOTAL = 16
-STEPS = 10
+STEPS = 50
 
 def main():
     # 1. Setup Distributed Environment
@@ -50,34 +50,32 @@ def main():
     # 3. Setup Optimizer
     # We only optimize the parameters present on THIS device
     optimizer = optim.SGD(model.parameters(), lr=0.01)
+    # --- Data Generation ---
+    fixed_input = None
+    fixed_target = None
+    torch.manual_seed(42) # Ensure reproducibility
+    # In Pipeline Parallelism, only Rank 0 loads the data.
+    if rank == 0:
+        fixed_input = torch.randn(BATCH_SIZE, HIDDEN_DIM).to(device)
+    else:
+        fixed_input = BATCH_SIZE
+    # Target (Labels)
+    # Only the Last Rank needs the targets to calc loss.
+    if rank == world_size - 1:
+        torch.manual_seed(42)
+        # We want the model to learn to classify these random vectors into class '0' or '1'
+        fixed_target = torch.randint(0, 2, (BATCH_SIZE,)).to(device)
 
     # 4. Training Loop
     model.train()
     for step in range(STEPS):
         optimizer.zero_grad()
-        
-        # --- Data Generation ---
-        # In Pipeline Parallelism, usually only Rank 0 loads the data.
-        # Everyone else passes 'None' into the step function.
-        if rank == 0:
-            # Create dummy input: (Batch, Hidden)
-            data = torch.randn(BATCH_SIZE, HIDDEN_DIM).to(device)
-        else:
-            data = None
-            
-        # Target (Labels)
-        # Usually only the Last Rank needs the targets to calc loss.
-        if rank == world_size - 1:
-            # Dummy targets: integers [0, HIDDEN_DIM)
-            targets = torch.randint(0, HIDDEN_DIM, (BATCH_SIZE,)).to(device)
-        else:
-            targets = None
 
         # --- The Pipeline Step ---
         start_time = time.time()
         
         # This function handles the Send/Recv/Compute orchestration
-        loss = naive_pipeline_step(model, comms, data, targets, HIDDEN_DIM, device)
+        loss = naive_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, device)
         
         # Optimizer Step (All ranks do this locally after backward pass completes)
         optimizer.step()
@@ -97,7 +95,7 @@ def main():
         print("--- Training Complete ---")
     torch.distributed.destroy_process_group()
 
-'''What will happen:
+'''What will happen when torchrun --nproc-per-node=4 src/main.py:
 
 torchrun launches 4 copies of main.py.
 
