@@ -34,7 +34,7 @@ Cut the `nn.Sequential` into two pieces: `part1` and `part2`.
 - **Solution:** Model Partitioning (slicing `nn.Sequential`).
   - See the init in [model.py](../src/model.py).
 
-#### The Naive Solution:
+#### [The Naive Solution](/material/naive.md):
 
 - **Concept:** Stop-and-wait execution.
 - **Lab:** Implement the Naive Schedule. Measure utilization.
