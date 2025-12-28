@@ -33,10 +33,6 @@ import time
 from comms import init_distributed, PipelineComms
 from model import ShardedMLP
 from schedule import naive_pipeline_step
-from profiler import PipelineProfiler
-import os
-# At top of file
-profiler = PipelineProfiler(rank=int(os.environ["RANK"]), enabled=True)
 # Hyperparameters
 BATCH_SIZE = 32
 HIDDEN_DIM = 128
@@ -93,10 +89,10 @@ for step in range(STEPS):
     
     if model.is_last:
         # This function handles the Send/Recv/Compute orchestration
-        loss = naive_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, device, profiler)
+        loss = naive_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, device)
     else:
         # This GPU doesn't know the loss; it just finished its communication/compute cycle
-        naive_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, device, profiler)
+        naive_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, device)
     
     # Optimizer Step (All ranks do this locally after backward pass completes)
     optimizer.step()
@@ -111,5 +107,4 @@ if rank == world_size - 1:
     print("--- Training Complete ---")
     duration = time.time() - start_time
     print(f"Final Loss: {loss:.6f} | Time: {duration:.3f}s")
-profiler.print_summary()
 torch.distributed.destroy_process_group()

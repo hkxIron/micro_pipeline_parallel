@@ -32,7 +32,7 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch, targets,
     # B. Compute
     # if you are not last, you just calculate activations
     # if you are last, you also calculate the loss with targets, which is output
-    output = model(input_data, targets if comms.rank == comms.world_size -1 else None)
+    output = model(input_data, targets)
 
     # C. Send data to the right
     if not model.is_last:
@@ -46,7 +46,6 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch, targets,
         # Scalar Backward: loss.backward() (Used only on the last GPU).
         # Non-Scalar Backward: output.backward(gradient) (Used on all previous GPUs).
         loss.backward() # This starts the chain reaction
-        grad_to_send = input_data.grad 
     else:
         # Receive gradients coming from the right
         # whereas in the forward pass, we don't have the batch size unless we are the first device,
@@ -60,13 +59,13 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch, targets,
         # This provided gradient acts as the starting point for the Vector-Jacobian Product,
         # allowing the chain rule to flow backward to the weights and the input.
         output.backward(grad_from_next)
-        grad_to_send = input_data.grad
-        '''
-        ∂Weights/∂Loss are the gradients which tell the model how to change its own internal layers.
-        ∂Input/∂Loss are the gradients which we back-propagate; if Rank 0 is the very first layer
-        (taking in the raw data/images), it technically calculates the gradient with respect to
-        the raw input, but we discard this because we can't "update" the training data!
-        '''
+    grad_to_send = input_data.grad
+    '''
+    ∂Weights/∂Loss are the gradients which tell the model how to change its own internal layers.
+    ∂Input/∂Loss are the gradients which we back-propagate; if Rank 0 is the very first layer
+    (taking in the raw data/images), it technically calculates the gradient with respect to
+    the raw input, but we discard this because we can't "update" the training data!
+    '''
     # C. Send Gradients
     if not model.is_first:
         comms.send_backward(grad_to_send)
