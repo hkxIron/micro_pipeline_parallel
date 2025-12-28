@@ -14,6 +14,8 @@ TOTAL_LAYERS = 16
 STEPS = 50
 
 # 1. Setup Distributed Environment TODO
+rank, world_size, device = None
+comms = None
 
 torch.manual_seed(42)
 # Each rank needs to "skip" the random numbers used by previous ranks
@@ -25,18 +27,19 @@ if rank == 0:
     print(f"--- Starting Micro PP on {world_size} Processes (Mac/CPU) ---")
 
 # 2. Initialize the Sharded Model TODO
+model = None
 
 # 3. Setup Optimizer
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 # 4. Only Rank 0 loads the data. TODO
 if rank == 0:
-    pass
+    fixed_input = None
 else:
     pass
 # 5. Only the Last Rank needs the targets to calc loss. TODO
 if rank == world_size - 1:
     # We want the model to learn to classify these random vectors into class '0' or '1'
-    pass
+    fixed_target = None
 else:
     pass
 
