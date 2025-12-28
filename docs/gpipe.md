@@ -7,6 +7,7 @@
 
 #### Bubbles
 - ![](./bubble.png)
+
 - Increasing the number of microbatches m, is necessary for making the bubble fraction small; increasing the memory demand.
 As the number of micro-batches (m) increases relative to the number of GPUs (n), the bubble fraction ( 
 m

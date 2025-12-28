@@ -4,6 +4,7 @@
 - We split our model into multiple parts, and assign each one to a GPU.
 - Then we train, inserting communication steps at the boundaries where we’ve split the model.
 - We only use node-to-node communication (MPI.Send and MPI.Recv) and don’t need any collective communication primitives.
+- ![](https://lilianweng.github.io/posts/2021-09-25-train-large/naive-data-parallelism.png)
 
 #### Forward Pass
 1. Compute intermediate on GPU1.
