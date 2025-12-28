@@ -1,9 +1,8 @@
 import torch.nn as nn
 
 class ShardedMLP(nn.Module):
-    def __init__(self, hidden_dim, total_layers, rank, world_size):
+    def __init__(self, dim, total_layers, rank, world_size):
         super().__init__()
-        
         # 1. Calculate how many layers THIS GPU is responsible for
         layers_per_gpu = total_layers // world_size
         
@@ -15,12 +14,12 @@ class ShardedMLP(nn.Module):
         layers = []
         for _ in range(layers_per_gpu):
             # For a simple MLP, every layer looks the same
-            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.Linear(dim, dim))
             layers.append(nn.ReLU())
             
         if self.is_last:
             self.loss_fn = nn.CrossEntropyLoss()
-            layers.append(nn.Linear(hidden_dim, 2))
+            layers.append(nn.Linear(dim, 2))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x, targets=None):

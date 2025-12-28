@@ -21,7 +21,7 @@ Start with a MLP and train it on a single CPU.
 Cut the `nn.Sequential` into two pieces: `part1` and `part2`.
 
 - **The Exercise:** Try to train it by manually passing the output of `part1` into `part2`.
-- **The Lesson:** Even on one machine, you have to manage the "hand-off" of the activation and the gradient.
+- **The Lesson:** You have to manage the "hand-off" of the activations; autograd handles the gradients for us.
 
 ### Distributed Basics
 
