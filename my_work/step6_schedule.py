@@ -6,9 +6,9 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch, targets,
     A single training step using the Naive (Stop-and-Wait) schedule.
 
     TODOs:
-    - Receive input from previous stage if not first stage
+    - Receive input from previous stage if not first stage (requires_grad)
     - Forward batch through model
-    - Send output to next stage if not last stage
+    - Send output to next stage if not last stage (detach)
     - Perform backward pass: 
         - If last stage, compute loss and call backward on it
         - Else, receive grad from next stage and call backward
