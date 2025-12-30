@@ -1,3 +1,4 @@
+import torch
 from step2_comms import PipelineComms
 from step4_model import ShardedMLP
 
@@ -28,6 +29,7 @@ def gpipe_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device
     GPipe Schedule: FWD all chunks -> BWD all chunks.
     """
     # TODO: Chunk the batches into microbatches and the targets in to microtargets
+    # TODO: Initialize buffers for the input and activations
     # TODO: For i in [0..chunks):
     #     - If comms.rank == 0, use microbatch directly; else, receive input
     #     - Forward microbatch through model
