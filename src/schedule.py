@@ -164,58 +164,42 @@ def onef_oneb_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, de
     num_1f1b = chunks - num_warmup
     
     def run_forward(micro_batch_idx):
-        print(f"[Rank {comms.rank}] run_forward({micro_batch_idx}) START")
         # ... Setup Input ...
         if comms.rank == 0:
             input_data = micro_batches[micro_batch_idx]
-            print(f"[Rank {comms.rank}] run_forward({micro_batch_idx}) Got input from micro_batches")
         else:
-            print(f"[Rank {comms.rank}] run_forward({micro_batch_idx}) About to recv_forward...")
             shape = (batch//chunks, hidden_dim)
             input_data = comms.recv_forward(shape, device)
-            print(f"[Rank {comms.rank}] run_forward({micro_batch_idx}) recv_forward COMPLETE")
             input_data.requires_grad = True
 
         # B. Forward Pass
         if comms.rank == comms.world_size - 1:
             output = model(input_data, micro_targets[micro_batch_idx])
-            print(f"[Rank {comms.rank}] run_forward({micro_batch_idx}) Model forward COMPLETE (last rank)")
         else:
             output = model(input_data)
-            print(f"[Rank {comms.rank}] run_forward({micro_batch_idx}) Model forward COMPLETE, about to isend_forward (ASYNC)...")
             # ASYNC SEND - returns immediately, doesn't block
             req = comms.isend_forward(output.detach())
             async_requests.append(req)  # Keep request alive to prevent buffer deallocation
-            print(f"[Rank {comms.rank}] run_forward({micro_batch_idx}) isend_forward started (non-blocking)")
 
         input_buffers[micro_batch_idx] = input_data
         output_buffers[micro_batch_idx] = output
-        print(f"[Rank {comms.rank}] run_forward({micro_batch_idx}) END")
 
     def run_backward(micro_batch_idx):
-        print(f"[Rank {comms.rank}] run_backward({micro_batch_idx}) START")
         input_data = input_buffers[micro_batch_idx]
         output = output_buffers[micro_batch_idx]
         
         if comms.rank == comms.world_size - 1:
             loss = output / chunks
             loss.backward()
-            print(f"[Rank {comms.rank}] run_backward({micro_batch_idx}) Loss backward COMPLETE (last rank)")
         else:
-            print(f"[Rank {comms.rank}] run_backward({micro_batch_idx}) About to recv_backward...")
             grad_from_next = comms.recv_backward(output.shape, device)
-            print(f"[Rank {comms.rank}] run_backward({micro_batch_idx}) recv_backward COMPLETE")
             output.backward(grad_from_next)
-            print(f"[Rank {comms.rank}] run_backward({micro_batch_idx}) Output backward COMPLETE")
             
         if comms.rank != 0:
-            print(f"[Rank {comms.rank}] run_backward({micro_batch_idx}) About to send_backward (BLOCKING)...")
             comms.send_backward(input_data.grad)
-            print(f"[Rank {comms.rank}] run_backward({micro_batch_idx}) send_backward COMPLETE (unblocked)")
         
         if comms.rank == comms.world_size - 1:
             return loss
-        print(f"[Rank {comms.rank}] run_backward({micro_batch_idx}) END")
 
     # --- EXECUTION PHASES ---
     if comms.rank == comms.world_size - 1:
@@ -226,14 +210,10 @@ def onef_oneb_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, de
         run_forward(i)
 
     # Phase 2: Steady State (1F1B)
-    print(f"[Rank {comms.rank}] === STEADY STATE START (1F1B) ===")
     for i in range(num_1f1b):
-        print(f"[Rank {comms.rank}] === 1F1B Iteration {i} ===")
         run_forward(i + num_warmup)
-        print(f"[Rank {comms.rank}] === After forward, about to call backward ===")
         # run_backward returns the loss (on last rank) or None (others)
         res = run_backward(i)
-        print(f"[Rank {comms.rank}] === 1F1B Iteration {i} COMPLETE ===")
         if comms.rank == comms.world_size - 1:
             total_loss += res
 
@@ -242,12 +222,6 @@ def onef_oneb_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, de
         res = run_backward(i + num_1f1b)
         if comms.rank == comms.world_size - 1:
             total_loss += res
-    
-    # Wait for all async sends to complete (ensures buffers stay alive)
-    print(f"[Rank {comms.rank}] Waiting for {len(async_requests)} async sends to complete...")
-    for req in async_requests:
-        req.wait()
-    print(f"[Rank {comms.rank}] All async sends complete")
     
     # Return Loss
     return total_loss if comms.rank == comms.world_size - 1 else None
