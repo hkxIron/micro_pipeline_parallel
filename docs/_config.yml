@@ -3,4 +3,5 @@ plugins:
   - jekyll-remote-theme
 minima:
   skin: auto
+header_pages: []
 
