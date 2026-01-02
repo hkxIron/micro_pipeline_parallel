@@ -1,4 +1,5 @@
 import time
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,6 +10,7 @@ HIDDEN_DIM = 128
 TOTAL_LAYERS = 16
 STEPS = 50
 
+
 class Part1(nn.Module):
     def __init__(self, dim, depth):
         super().__init__()
@@ -16,6 +18,7 @@ class Part1(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
 
 class Part2(nn.Module):
     def __init__(self, dim, depth):
@@ -25,6 +28,7 @@ class Part2(nn.Module):
     def forward(self, x, targets):
         logits = self.net(x)
         return self.loss_fn(logits, targets)
+
 
 # 3. Setup
 torch.manual_seed(42)
@@ -44,7 +48,8 @@ fixed_target = torch.randint(0, 2, (BATCH_SIZE,))
 # 4. Training Loop
 print("--- Training Manual Split (Bridge to Distributed) ---")
 start_time = time.time()
-part1.train(); part2.train()
+part1.train()
+part2.train()
 for step in range(STEPS):
     optimizer.zero_grad()
     # --- FORWARD PASS ---

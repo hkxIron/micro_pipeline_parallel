@@ -1,4 +1,5 @@
 import time
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,6 +9,7 @@ BATCH_SIZE = 32
 HIDDEN_DIM = 128
 TOTAL_LAYERS = 16
 STEPS = 50
+
 
 # 2. The Monolithic Model
 # This is what we will shard across multiple GPUs
@@ -25,6 +27,7 @@ class MonolithicMLP(nn.Module):
     def forward(self, x, targets):
         logits = self.net(x)
         return self.loss_fn(logits, targets)
+
 
 # 3. Setup
 torch.manual_seed(42)

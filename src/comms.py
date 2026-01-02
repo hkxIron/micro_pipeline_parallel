@@ -1,6 +1,8 @@
+import os
+
 import torch
 import torch.distributed as dist
-import os
+
 
 def init_distributed():
     """
@@ -28,16 +30,18 @@ def init_distributed():
         exit()
     # 3. Initialize Group
     if torch.cuda.is_available():
-        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size,
-                                device_id=device)
-    else:        
+        dist.init_process_group(
+            backend="nccl", rank=rank, world_size=world_size, device_id=device
+        )
+    else:
         # The code dist.init_process_group(...) is a Global State Setter.
         #  It initializes the background communication threads (C++ NCCL backend).
         # It sets up the "phone lines" so Process 0 can send data to Process 1.
         # Once called, this state persists until the program ends or you call destroy_process_group().
         dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
-    
+
     return rank, world_size, device
+
 
 class PipelineComms:
     def __init__(self, rank, world_size):
@@ -63,11 +67,11 @@ class PipelineComms:
 
     def send_backward(self, tensor):
         """Send gradients back to the previous GPU."""
-        # Blocking communication (dist.send) means 
-        # the program waits until the send is complete 
+        # Blocking communication (dist.send) means
+        # the program waits until the send is complete
         # before proceeding, which is simple and easier
         # to reason about. Async (isend) allows overlapping
-        # computation and communication, 
+        # computation and communication,
         # increasing efficiency and complexity.
         dist.send(tensor.contiguous(), dst=self.prev_rank)
 
@@ -76,6 +80,6 @@ class PipelineComms:
         tensor = torch.zeros(shape, dtype=dtype, device=device)
         dist.recv(tensor, src=self.next_rank)
         return tensor
-    
+
     def isend_forward(self, tensor):
         return dist.isend(tensor.contiguous(), dst=self.next_rank)

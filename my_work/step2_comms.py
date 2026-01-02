@@ -1,6 +1,7 @@
-import torch
-import torch.distributed as dist
 import os
+
+import torch
+
 
 def init_distributed():
     """
@@ -14,8 +15,9 @@ def init_distributed():
     # 2. Set Device
     device = None
     # 3. Initialize Group
-    
+
     return rank, world_size, device
+
 
 class PipelineComms:
     def __init__(self, rank, world_size):

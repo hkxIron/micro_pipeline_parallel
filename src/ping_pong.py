@@ -1,10 +1,14 @@
-import torch, os
-from comms import init_distributed, PipelineComms
+import os
+
+import torch
+
+from comms import PipelineComms, init_distributed
+
 
 def ping_pong():
-    '''
+    """
     Send a tensor from device rank 0 to device rank 1 and print to verify.
-    '''
+    """
     rank, world_size, device = init_distributed()
     # play with the barrier!
     # torch.distributed.barrier() is mainly used to synchronize all processes,
@@ -23,6 +27,7 @@ def ping_pong():
         shape = (3,)
         received = comms.recv_forward(shape, device)
         print(f"Rank 1: Received {received}")
+
 
 if __name__ == "__main__":
     ping_pong()

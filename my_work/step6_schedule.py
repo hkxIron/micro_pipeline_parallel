@@ -1,8 +1,10 @@
-import torch
 from step2_comms import PipelineComms
 from step4_model import ShardedMLP
 
-def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch, targets, hidden_dim, device):
+
+def naive_pipeline_step(
+    model: ShardedMLP, comms: PipelineComms, batch, targets, hidden_dim, device
+):
     """
     A single training step using the Naive (Stop-and-Wait) schedule.
 
@@ -10,7 +12,7 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch, targets,
     - Receive input from previous stage if not first stage (requires_grad)
     - Forward batch through model
     - Send output to next stage if not last stage (detach)
-    - Perform backward pass: 
+    - Perform backward pass:
         - If last stage, compute loss and call backward on it
         - Else, receive grad from next stage and call backward
     - Send grad to previous stage if not first stage
@@ -23,6 +25,7 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch, targets,
     # TODO: Send grad to previous stage if not first
     # TODO: Return loss if last stage, else None
     pass
+
 
 def gpipe_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device):
     """
@@ -42,6 +45,7 @@ def gpipe_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device
     #     - Send grad to previous stage if not first
     # TODO: Return loss if last stage, else None
     pass
+
 
 def onef_oneb_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device):
     """

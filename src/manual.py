@@ -1,4 +1,5 @@
 import time
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,6 +9,7 @@ BATCH_SIZE = 32
 HIDDEN_DIM = 128
 TOTAL_LAYERS = 16
 STEPS = 50
+
 
 # 2. Manual Split Classes
 # As we can see, pipeline stages aren't always identical;
@@ -27,6 +29,7 @@ class Part1(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+
 class Part2(nn.Module):
     def __init__(self, dim, depth):
         super().__init__()
@@ -42,6 +45,7 @@ class Part2(nn.Module):
     def forward(self, x, targets):
         logits = self.net(x)
         return self.loss_fn(logits, targets)
+
 
 # 3. Setup
 torch.manual_seed(42)
@@ -69,7 +73,8 @@ else:
 # 4. Training Loop
 print("--- Training Manual Split (Bridge to Distributed) ---")
 start_time = time.time()
-part1.train(); part2.train()
+part1.train()
+part2.train()
 for step in range(STEPS):
     optimizer.zero_grad()
     # --- FORWARD PASS ---
@@ -83,7 +88,7 @@ for step in range(STEPS):
     hidden.retain_grad()
     loss = part2(hidden, fixed_target)
     # --- BACKWARD PASS ---
-    '''
+    """
     loss.backward() backpropagates through both parts automatically.
     PyTorch's autograd maintains the computation graph across the forward pass:
     hidden = part1(fixed_input) → graph includes part1
@@ -100,7 +105,7 @@ for step in range(STEPS):
      automatically require gradients, and
     .to() operations preserve the graph connection
     The optimizer tracks both parts' parameters
-    '''
+    """
     loss.backward()
     # The distributed version (in schedule.py) manually handles
     # hidden.grad because it's split across processes; in a single

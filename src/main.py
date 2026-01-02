@@ -1,4 +1,4 @@
-'''
+"""
 torchrun --nproc-per-node=4 src/main.py
 
 main.py is a sheet of music.
@@ -24,15 +24,18 @@ It assigns RANK 0, 1, 2, 3 automatically.
 Rank 0 creates random data and sends it to Rank 1...
 
 Rank 3 calculates loss and sends gradients back to Rank 2...
-'''
-import torch
-import torch.optim as optim
+"""
+
 import time
 
+import torch
+import torch.optim as optim
+
 # Import our modules
-from comms import init_distributed, PipelineComms
+from comms import PipelineComms, init_distributed
 from model import ShardedMLP
-from schedule import naive_pipeline_step, gpipe_pipeline_step, onef_oneb_pipeline_step
+from schedule import onef_oneb_pipeline_step
+
 # Hyperparameters
 BATCH_SIZE = 32
 HIDDEN_DIM = 128
@@ -50,7 +53,9 @@ torch.manual_seed(42)
 # Rough approximation: advance RNG state by rank * layers_per_rank * params_per_layer
 # nn.Linear initialization uses a more complex pattern (Kaiming/He initialization
 # typically samples from a normal distribution with specific parameters).
-for i in range(rank * (TOTAL_LAYERS // world_size) * 2):  # 2 params per layer (weight, bias)
+for i in range(
+    rank * (TOTAL_LAYERS // world_size) * 2
+):  # 2 params per layer (weight, bias)
     torch.randn(1)  # Consume RNG state
 
 if rank == 0:
@@ -58,12 +63,7 @@ if rank == 0:
 
 # 2. Initialize the Sharded Model
 # Each process only initializes its specific slice of layers
-model = ShardedMLP(
-    HIDDEN_DIM, 
-    TOTAL_LAYERS, 
-    rank, 
-    world_size
-).to(device)
+model = ShardedMLP(HIDDEN_DIM, TOTAL_LAYERS, rank, world_size).to(device)
 
 # 3. Setup Optimizer
 # We only optimize the parameters present on THIS device
@@ -89,11 +89,15 @@ for step in range(STEPS):
     optimizer.zero_grad()
     if model.is_last:
         # This function handles the Send/Recv/Compute orchestration
-        loss = onef_oneb_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device)
+        loss = onef_oneb_pipeline_step(
+            model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device
+        )
     else:
         # This GPU doesn't know the loss; it just finished its communication/compute cycle
-        onef_oneb_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device)
-    
+        onef_oneb_pipeline_step(
+            model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device
+        )
+
     # Optimizer Step (All ranks do this locally after backward pass completes)
     optimizer.step()
 
