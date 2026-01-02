@@ -11,9 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - name: Install dependencies
-        run: uv sync --dev
-      - name: Run ruff
-        run: uv run ruff check src
+      - uses: astral-sh/ruff-action@v3
+        with:
+            src: "./src"
 
