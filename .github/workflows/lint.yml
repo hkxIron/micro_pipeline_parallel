@@ -12,8 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
-      - name: Install ruff
-        run: uv pip install ruff
       - name: Run ruff
         run: uv run ruff check src
 
