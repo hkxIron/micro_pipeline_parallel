@@ -1,34 +1,17 @@
 import torch.nn as nn
 
 class ShardedMLP(nn.Module):
-    def __init__(self, dim, total_layers, rank, world_size):
+    def __init__(self, hidden_dim, total_layers, rank, world_size):
         super().__init__()
-        # 1. Calculate how many layers THIS GPU is responsible for
-        layers_per_gpu = total_layers // world_size
         
-        self.rank = rank
-        self.is_first = (rank == 0)
-        self.is_last = (rank + 1 == world_size)
+        # 1. Calculate how many layers THIS GPU is responsible for
         
         # 2. Build the local stack of layers
-        layers = []
-        for _ in range(layers_per_gpu):
-            # For a simple MLP, every layer looks the same
-            layers.append(nn.Linear(dim, dim))
-            layers.append(nn.ReLU())
-            
-        if self.is_last:
-            self.loss_fn = nn.CrossEntropyLoss()
-            layers.append(nn.Linear(dim, 2))
-        self.net = nn.Sequential(*layers)
 
     def forward(self, x, targets=None):
         # Run the local chunk of the network
         x = self.net(x)
         
         # Only the last GPU calculates loss
-        if self.is_last and targets is not None:
-            return self.loss_fn(x, targets)
         
         # Everyone else just returns the hidden states (activations)
-        return x
