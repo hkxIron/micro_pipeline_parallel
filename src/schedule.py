@@ -166,7 +166,7 @@ def gpipe_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targets,
         return total_loss
 
 
-def onef_oneb_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targets, hidden_dim:int, chunk_num:int, device):
+def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targets, hidden_dim:int, chunk_num:int, device):
     """
     1F1B Schedule: Interleaves Forward and Backward passes.
     交错进行前向和反向
@@ -193,11 +193,35 @@ def onef_oneb_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targ
     num_warmup = comms.world_size - comms.rank - 1 
     num_1f1b = chunk_num - num_warmup
     """
-    若world_size=4, chunk_num=8, 
+    若world_size=4, chunk_num=8, 所有的micro_batch总共会有8*2=16个前向+反向
         rank=0, 则num_warmup=4-0-1=3, num_1f1b=8-3=5
         rank=1, 则num_warmup=4-1-1=2, num_1f1b=8-2=6
         rank=2, 则num_warmup=4-2-1=1, num_1f1b=8-1=7
         rank=3, 则num_warmup=4-3-1=0, num_1f1b=8-0=8
+    
+    异步通信的原因分析
+    1. 性能优化策略
+    - 前向传播的异步发送：在1F1B调度中，前向传播阶段可以异步发送激活值给下一层，因为下一层可以立即开始计算，不需要等待当前层完成所有操作
+    - 反向传播的同步通信：梯度传播需要严格的顺序依赖，必须等待前一层的梯度计算完成才能继续
+    2. 数据依赖关系
+    - 前向传播：激活值发送后，当前层可以继续处理下一个micro-batch，与下一层的计算可以并行
+    - 反向传播：梯度必须按顺序传播，因为每个层的梯度计算依赖于后一层传回的梯度
+    3. 代码中的具体实现
+        1 # 异步发送前向激活值（第221行）
+        2 req: Optional[Work] = comms.isend_forward(output.detach())
+        3 
+        4 # 同步接收前向数据（第208行） 
+        5 input_data = comms.recv_forward(shape, device)
+        6 
+        7 # 同步接收反向梯度（第229行）
+        8 grad_from_next = comms.recv_backward(output.shape, device)
+        9 
+        10 # 同步发送反向梯度（第238行）
+        11 comms.send_backward(input_data.grad)
+    4. 设计原理
+    - 最大化流水线利用率：通过异步发送前向激活值，可以让计算和通信重叠，减少流水线中的气泡（bubble）
+    - 保证正确性：反向传播必须同步，确保梯度计算的正确顺序和依赖关系
+    这种混合通信模式是1F1B调度算法的核心优化，能够在保证正确性的同时最大化并行效率。
     """
 
     # 仅对一个micro_batch进行前向传播
@@ -218,6 +242,7 @@ def onef_oneb_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targ
             output = model(input_data)
             # ASYNC SEND - returns immediately, doesn't block
             # 异步发送至下一层layer
+            # 前向传播的异步发送：在1F1B调度中，前向传播阶段可以异步发送激活值给下一层，因为下一层可以立即开始计算，不需要等待当前层完成所有操作
             req: Optional[Work] = comms.isend_forward(output.detach()) # 返回异步请求对象
             async_requests.append(req)  # Keep request alive to prevent buffer deallocation
 
@@ -252,19 +277,19 @@ def onef_oneb_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targ
     对每个micro-batch展开有：
         - 3次前向：m0-f, m1-f, m2-f, 注意：前向与反向之间还有一些空泡时间，未列出
         - 5次前向和反向：(m3-f,m0-b), (m4-f,m1-b), (m5-f,m2-b), (m6-f,m3-b), (m7-f,m4-b), 前向与反向micro_batch的index相差3
-        - 3次反向：m5-b, m6-b, m7-b
+        - 3次反向：m5-b, m6-b, m7-b, 注意：前向与反向index之间相差5
 
     rank=1: num_warmup=2次前向 + num_1f1b=6次前向和反向 + num_warmup=2次反向
     对每个micro-batch展开有：
         - 2次前向：m0-f, m1-f
         - 6次前向和反向：(m2-f,m0-b), (m3-f,m1-b), (m4-f,m2-b), (m5-f,m3-b), (m6-f,m4-b), (m7-f,m5-b), 前向与反向micro_batch的index相差2
-        - 2次反向：m6-b, m7-b
+        - 2次反向：m6-b, m7-b, 注意：前向与反向index之间相差6
 
     rank=2: num_warmup=1次前向 + num_1f1b=7次前向和反向 + num_warmup=1次反向
     对每个micro-batch展开有：
         - 1次前向：m0-f
         - 7次前向和反向：(m1-f, m0-b), (m2-f,m1-b), (m3-f,m2-b), (m4-f,m3-b), (m5-f,m4-b), (m6-f,m5-b), (m7-f,m6-b), 前向与反向micro_batch的index相差1
-        - 1次反向：m7-b
+        - 1次反向：m7-b, 注意：前向与反向index之间相差7
 
     rank=3: num_warmup=0次前向 + num_1f1b=8次前向和反向 + num_warmup=0次反向
     对每个micro-batch展开有：

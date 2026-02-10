@@ -34,7 +34,7 @@ import torch.optim as optim
 # Import our modules
 from comms import PipelineComms, init_distributed
 from model import ShardedMLP
-from schedule import onef_oneb_pipeline_step
+from schedule import one_forward_one_backward_pipeline_step
 
 # Hyperparameters
 BATCH_SIZE = 32
@@ -99,15 +99,16 @@ for step in range(STEPS):
     if model.is_last:
         # 只有最后一层才需要计算loss
         # This function handles the Send/Recv/Compute orchestration
-        loss = onef_oneb_pipeline_step(
+        loss = one_forward_one_backward_pipeline_step(
             model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device
         )
     else:
         # This GPU doesn't know the loss; it just finished its communication/compute cycle
-        onef_oneb_pipeline_step(
+        one_forward_one_backward_pipeline_step(
             model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device
         )
 
+    # NOTE: 将当前rank的参数进行更新
     # Optimizer Step (All ranks do this locally after backward pass completes)
     optimizer.step()
 
