@@ -31,3 +31,7 @@ def ping_pong():
 
 if __name__ == "__main__":
     ping_pong()
+
+    """
+    torchrun --nproc-per-node=2 src/ping_pong.py
+    """

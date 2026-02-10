@@ -10,7 +10,9 @@ HIDDEN_DIM = 128
 TOTAL_LAYERS = 16
 STEPS = 50
 
-
+"""
+手动拆分模型
+"""
 # 2. Manual Split Classes
 # As we can see, pipeline stages aren't always identical;
 # here Part2 contains the model head
@@ -37,7 +39,7 @@ class Part2(nn.Module):
         for _ in range(depth // 2):
             layers.append(nn.Linear(dim, dim))
             layers.append(nn.ReLU())
-        # model head
+        # model head, 分走一半的loss
         layers.append(nn.Linear(dim, 2))
         self.net = nn.Sequential(*layers)
         self.loss_fn = nn.CrossEntropyLoss()

@@ -84,3 +84,7 @@ if rank == world_size - 1:
     print(f"Final Loss: {loss.item():.6f} | Time: {duration:.3f}s")
 profiler.print_summary()
 torch.distributed.destroy_process_group()
+
+"""
+ torchrun --nproc-per-node=2 src/profiled_main.py
+"""

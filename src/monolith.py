@@ -10,8 +10,9 @@ HIDDEN_DIM = 128
 TOTAL_LAYERS = 16
 STEPS = 50
 
+# 与PP无关
 
-# 2. The Monolithic Model
+# 2. The Monolithic(整体的) Model
 # This is what we will shard across multiple GPUs
 class MonolithicMLP(nn.Module):
     def __init__(self, dim, depth):
