@@ -8,7 +8,7 @@ import torch.optim as optim
 BATCH_SIZE = 32
 HIDDEN_DIM = 128
 TOTAL_LAYERS = 16
-STEPS = 50
+STEPS = 100
 
 """
 手动拆分模型
@@ -87,7 +87,7 @@ for step in range(STEPS):
         hidden = hidden.to(torch.cuda.device(1))
     # retain_grad() for inspection: in PP, this is what we'd send backward.
     # Without it, hidden.grad would be None.
-    hidden.retain_grad()
+    hidden.retain_grad() # 中间张量 hidden 的梯度被保留
     loss = part2(hidden, fixed_target)
     # --- BACKWARD PASS ---
     """
@@ -96,11 +96,13 @@ for step in range(STEPS):
     hidden = part1(fixed_input) → graph includes part1
     hidden = hidden.to(device(1)) → .to() is part of the graph
     loss = part2(hidden, fixed_target) → graph extends through part2
+
     loss.backward() → backpropagates through the entire graph:
     Computes gradients for part2's parameters
     Computes hidden.grad (input gradient to part2)
     Continues back through .to() operation
     Computes gradients for part1's parameters
+
     The graph connects automatically because:
     hidden from part1() has requires_grad=True,
     since outputs from modules with trainable parameters
@@ -109,6 +111,7 @@ for step in range(STEPS):
     The optimizer tracks both parts' parameters
     """
     loss.backward()
+    # print(f"after retain_grad: hidden.grad = {hidden.grad}")  # None
     # The distributed version (in schedule.py) manually handles
     # hidden.grad because it's split across processes; in a single
     # process, autograd handles gradients automatically.
@@ -122,3 +125,6 @@ for step in range(STEPS):
 
 duration = time.time() - start_time
 print(f"Final Loss: {loss.item():.6f} | Time: {duration:.3f}s")
+"""
+torchrun --nproc-per-node=2 src/manual.py
+"""

@@ -21,10 +21,14 @@ class PipelineProfiler:
             yield
             return
 
+        """
+        yield 语句让控制权交给 with 块内的代码
+        """
         start = time.perf_counter()
         try:
             yield
         finally:
+            # 退出上下文：无论 with 块内的代码是否抛出异常，finally 块都会执行
             elapsed = time.perf_counter() - start
             self.timings[name].append(elapsed)
 
