@@ -1,12 +1,12 @@
+from typing import Optional
 import torch
+from torch._C._distributed_c10d import Work
 
 from comms import PipelineComms
 from model import ShardedMLP
 
 
-def naive_pipeline_step(
-    model: ShardedMLP, comms: PipelineComms, batch, targets, hidden_dim, device
-):
+def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch:torch.Tensor, targets:torch.Tensor, hidden_dim:int, device):
     """
     A single training step using the Naive (Stop-and-Wait) schedule.
     """
@@ -37,11 +37,12 @@ def naive_pipeline_step(
     # B. Compute
     # if you are not last, you just calculate activations
     # if you are last, you also calculate the loss with targets, which is output
-    output = model(input_data, targets)
+    output = model.forward(input_data, targets)
 
-    # C. Send data to the right
+    # C. Send data to the right, ie: send activations to the next rank
     if not model.is_last:
-        comms.send_forward(output.detach())
+        # NOTE: 注意，此处output.detach()会使detach()后的数据没有梯度, 即发送到下一个rank的数据里没有grad, 如需梯度，需要在receive后手动设置requires_grad=True
+        comms.send_forward(output.detach()) 
 
     # --- PHASE 2: BACKWARD PASS ---
 
@@ -56,6 +57,7 @@ def naive_pipeline_step(
         # whereas in the forward pass, we don't have the batch size unless we are the first device,
         # since gradients are propagated for every activation computed, we can just take
         # the activation dimensions for the shape of the gradient tensor we receive in backward()
+        # 梯度必须与output.shape一致，因为backward()会自动计算梯度
         grad_from_next = comms.recv_backward(output.shape, device)
         # B. Compute Local Gradients
         # This is the "Backprop" step connecting the received grad to our weights
@@ -64,6 +66,7 @@ def naive_pipeline_step(
         # This provided gradient acts as the starting point for the Vector-Jacobian Product,
         # allowing the chain rule to flow backward to the weights and the input.
         output.backward(grad_from_next)
+    # 得到input_data的梯度
     grad_to_send = input_data.grad
     """
     ∂Weights/∂Loss are the gradients which tell the model how to change its own internal layers.
@@ -73,32 +76,40 @@ def naive_pipeline_step(
     """
     # C. Send Gradients
     if not model.is_first:
+        # 向前面的层反向传播梯度
         comms.send_backward(grad_to_send)
+
     if model.is_last:
         return loss
 
 
-def gpipe_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device):
+def gpipe_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targets, hidden_dim, chunk_num, device):
     """
+    先将所有的数据进行完全的前向，然后再一起进行反向
+
     GPipe Schedule: FWD all chunks -> BWD all chunks.
     """
     # 1. Prepare Data Slices
     if comms.rank == 0:
-        micro_batches = torch.chunk(batch, chunks)
+        micro_batches = torch.chunk(batch, chunk_num)
     if comms.rank == comms.world_size - 1:
-        micro_targets = targets.chunk(chunks)
+        micro_targets = targets.chunk(chunk_num)
 
     # Storage for "Phase 2"
     input_buffers = []
     output_buffers = []
 
+    """
+    转变思维，注意是在当前Rank上，不需要for循环
+    """
     # --- PHASE 1: ALL FORWARDS (Fill the Pipe) ---
-    for i in range(chunks):
+    for i in range(chunk_num):
         # A. Setup Input
         if comms.rank == 0:
             input_data = micro_batches[i]
         else:
-            shape = (batch // chunks, hidden_dim)
+            shape = (batch // chunk_num, hidden_dim)
+            # NOTE: 注意，这里也是同步等待
             input_data = comms.recv_forward(shape, device)
             input_data.requires_grad = True
 
@@ -106,16 +117,20 @@ def gpipe_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device
         if comms.rank == comms.world_size - 1:
             output = model(input_data, micro_targets[i])
         else:
+            # 如果不是最后一个rank, 不需要传输target
             output = model(input_data)
             comms.send_forward(output.detach())
 
         # D. Buffer for Backward
         input_buffers.append(input_data)
         output_buffers.append(output)  # On last rank, this is the Loss
+    # END FOR
 
     # --- PHASE 2: ALL BACKWARDS (Drain the Pipe) ---
     if comms.rank == comms.world_size - 1:
+        # total_loss: scalar
         total_loss = torch.zeros(output.shape, device=device)
+
     # Layers: Reverse Order (handled by Autograd).
     # Micro-batches: Forward Order (handled by loop to match the send/recv order).
     # Think of a conveyor belt
@@ -124,23 +139,26 @@ def gpipe_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device
     # GPipe schedule: all forwards are completed and stored before any backward
     # begins, so the order of backward iteration (reversed or not) does not
     # change gradients or loss accumulation across chunks.
-    for i in range(chunks):
+    for i in range(chunk_num):
         # Retrieve state from Phase 1
         input_data = input_buffers[i]
         output = output_buffers[i]
 
         if comms.rank == comms.world_size - 1:
             # On Last Rank, 'output' IS the loss
-            loss = output / chunks
-            loss.backward()
+            loss = output / chunk_num # 每个只累加 1/chunk_num的梯度
+            # NOTE: 注意，梯度反向传播后，会自动释放activations所占用的GPU缓存
+            loss.backward() # loss.backward()会自动累加梯度， 但没有更新weights, 也不会清空梯度
             total_loss += loss
         else:
             # On other ranks, we need gradients from downstream
+            # NOTE:接收下一层的梯度
             grad_from_next = comms.recv_backward(output.shape, device)
             output.backward(grad_from_next)
 
         # Send gradients backward (if not first)
         if comms.rank != 0:
+            # 向前面的层传播梯度
             comms.send_backward(input_data.grad)
 
     # Return loss across chunks (for logging) if last rank
@@ -148,33 +166,48 @@ def gpipe_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device
         return total_loss
 
 
-def onef_oneb_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, device):
+def onef_oneb_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targets, hidden_dim:int, chunk_num:int, device):
     """
     1F1B Schedule: Interleaves Forward and Backward passes.
+    交错进行前向和反向
     """
     # 1. Prepare Data Slices
     if comms.rank == 0:
-        micro_batches = torch.chunk(batch, chunks)
-    if comms.rank == comms.world_size - 1:
-        micro_targets = targets.chunk(chunks)
+        # 在batch维度将batch切分成chunks个micro_batches, 每个micro_batch的shape为(batch/chunks, hidden_dim)
+        micro_batches = torch.chunk(batch, chunk_num, dim=0)
+    if comms.rank == comms.world_size - 1: # 最后一个GPU, 将targets切分成chunks个micro_targets, 每个micro_target的shape为(batch/chunks)
+        micro_targets = targets.chunk(chunk_num)
 
     # Storage for "Phase 2"
-    input_buffers = [None] * chunks
-    output_buffers = [None] * chunks
+    input_buffers = [None] * chunk_num # 每个micro_batch的输入数据
+    output_buffers = [None] * chunk_num
     async_requests = []  # Keep request objects alive to prevent buffer deallocation
 
+    """
+    注意：这里的warmup和cooldown的逻辑，是针对各rank上的gpu流水线是否饱和而言的，
+    不是指lr中的warmup
+    """
     # Schedule Logic
     # Rank 0 (First) has max warmup (needs to fill the whole pipe)
     # Rank N (Last) has 0 warmup (can backward immediately)
-    num_warmup = comms.world_size - comms.rank - 1
-    num_1f1b = chunks - num_warmup
+    num_warmup = comms.world_size - comms.rank - 1 
+    num_1f1b = chunk_num - num_warmup
+    """
+    若world_size=4, chunk_num=8, 
+        rank=0, 则num_warmup=4-0-1=3, num_1f1b=8-3=5
+        rank=1, 则num_warmup=4-1-1=2, num_1f1b=8-2=6
+        rank=2, 则num_warmup=4-2-1=1, num_1f1b=8-1=7
+        rank=3, 则num_warmup=4-3-1=0, num_1f1b=8-0=8
+    """
 
-    def run_forward(micro_batch_idx):
+    # 仅对一个micro_batch进行前向传播
+    def run_forward(micro_batch_idx:int):
         # ... Setup Input ...
         if comms.rank == 0:
             input_data = micro_batches[micro_batch_idx]
         else:
-            shape = (batch // chunks, hidden_dim)
+            shape = (batch // chunk_num, hidden_dim)
+            # 同步的等待前面的layer的forward输出
             input_data = comms.recv_forward(shape, device)
             input_data.requires_grad = True
 
@@ -184,23 +217,23 @@ def onef_oneb_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, de
         else:
             output = model(input_data)
             # ASYNC SEND - returns immediately, doesn't block
-            req = comms.isend_forward(output.detach())
-            async_requests.append(
-                req
-            )  # Keep request alive to prevent buffer deallocation
+            # 异步发送至下一层layer
+            req: Optional[Work] = comms.isend_forward(output.detach()) # 返回异步请求对象
+            async_requests.append(req)  # Keep request alive to prevent buffer deallocation
 
         input_buffers[micro_batch_idx] = input_data
         output_buffers[micro_batch_idx] = output
 
-    def run_backward(micro_batch_idx):
+    # 仅对一个micro_batch进行反向传播
+    def run_backward(micro_batch_idx:int):
         input_data = input_buffers[micro_batch_idx]
         output = output_buffers[micro_batch_idx]
 
         if comms.rank == comms.world_size - 1:
-            loss = output / chunks
+            loss = output / chunk_num
             loss.backward()
         else:
-            grad_from_next = comms.recv_backward(output.shape, device)
+            grad_from_next: torch.Tensor = comms.recv_backward(output.shape, device)
             output.backward(grad_from_next)
 
         if comms.rank != 0:
@@ -211,23 +244,50 @@ def onef_oneb_pipeline_step(model, comms, batch, targets, hidden_dim, chunks, de
 
     # --- EXECUTION PHASES ---
     if comms.rank == comms.world_size - 1:
-        total_loss = torch.zeros(1, device=device)
+        total_loss: torch.Tensor = torch.zeros(1, device=device)
 
-    # Phase 1: Warmup (Forward Only)
+    """
+    注意：在当前rank的GPU上进行前向与反向, 请参照1F1B Schedule的流水线图
+    rank=0: num_warmup=3次前向 + num_1f1b=5次前向和反向 + num_warmup=3次反向
+    对每个micro-batch展开有：
+        - 3次前向：m0-f, m1-f, m2-f, 注意：前向与反向之间还有一些空泡时间，未列出
+        - 5次前向和反向：(m3-f,m0-b), (m4-f,m1-b), (m5-f,m2-b), (m6-f,m3-b), (m7-f,m4-b), 前向与反向micro_batch的index相差3
+        - 3次反向：m5-b, m6-b, m7-b
+
+    rank=1: num_warmup=2次前向 + num_1f1b=6次前向和反向 + num_warmup=2次反向
+    对每个micro-batch展开有：
+        - 2次前向：m0-f, m1-f
+        - 6次前向和反向：(m2-f,m0-b), (m3-f,m1-b), (m4-f,m2-b), (m5-f,m3-b), (m6-f,m4-b), (m7-f,m5-b), 前向与反向micro_batch的index相差2
+        - 2次反向：m6-b, m7-b
+
+    rank=2: num_warmup=1次前向 + num_1f1b=7次前向和反向 + num_warmup=1次反向
+    对每个micro-batch展开有：
+        - 1次前向：m0-f
+        - 7次前向和反向：(m1-f, m0-b), (m2-f,m1-b), (m3-f,m2-b), (m4-f,m3-b), (m5-f,m4-b), (m6-f,m5-b), (m7-f,m6-b), 前向与反向micro_batch的index相差1
+        - 1次反向：m7-b
+
+    rank=3: num_warmup=0次前向 + num_1f1b=8次前向和反向 + num_warmup=0次反向
+    对每个micro-batch展开有：
+        - 0次前向：
+        - 6次前向和反向：(m0-f,m0-b), (m1-f,m1-b), (m2-f,m2-b), (m3-f,m3-b), (m4-f,m4-b), (m5-f,m5-b), (m6-f,m6-b), (m7-f,m7-b), 前向与反向micro_batch的index相差0
+        - 0次反向：
+
+    """
+    # Phase 1: Warmup (Forward Only), 第一阶段只进行前向传播，打满流水线
     for i in range(num_warmup):
-        run_forward(i)
+        run_forward(micro_batch_idx=i)
 
-    # Phase 2: Steady State (1F1B)
+    # Phase 2: Steady State (1F1B), 第二阶段进行交错的前向和反向传播
     for i in range(num_1f1b):
-        run_forward(i + num_warmup)
+        run_forward(micro_batch_idx=i + num_warmup)
         # run_backward returns the loss (on last rank) or None (others)
-        res = run_backward(i)
+        res = run_backward(micro_batch_idx=i)
         if comms.rank == comms.world_size - 1:
             total_loss += res
 
     # Phase 3: Cooldown (Backward Only)
     for i in range(num_warmup):
-        run_backward(i + num_1f1b)
+        run_backward(micro_batch_idx=i + num_1f1b)
 
     # Return Loss
     return total_loss if comms.rank == comms.world_size - 1 else None
