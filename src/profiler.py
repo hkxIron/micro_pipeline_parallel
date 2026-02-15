@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 class PipelineProfiler:
     """Lean profiler for pipeline stages - tracks compute, comm, and bubbles."""
 
+    # NOTE: 用于记录每个rank的通信时间, 每个rank都有一个单独的profiler
     def __init__(self, rank: int, enabled: bool = True):
         self.rank = rank
         self.enabled = enabled
@@ -30,16 +31,18 @@ class PipelineProfiler:
         finally:
             # 退出上下文：无论 with 块内的代码是否抛出异常，finally 块都会执行
             elapsed = time.perf_counter() - start
-            self.timings[name].append(elapsed)
+            self.timings[name].append(elapsed) # 注意，都是append
 
     def start_stage(self, stage_name: str):
         """Mark the start of a pipeline stage (e.g., 'forward', 'backward')."""
+        # 记录流水线开始的时间
         if not self.enabled:
             return
         self.stage_start = time.perf_counter()
         self.active_timers[stage_name] = self.stage_start
 
     def end_stage(self, stage_name: str):
+        # 记录流水线结束的时间
         """Mark the end of a pipeline stage."""
         if not self.enabled or self.stage_start is None:
             return
@@ -80,9 +83,7 @@ class PipelineProfiler:
 
         # Compute utilization (active compute + comm within steps)
         compute_time = sum(stats[k]["total"] for k in stats.keys() if "compute" in k)
-        comm_time = sum(
-            stats[k]["total"] for k in stats.keys() if "send" in k or "recv" in k
-        )
+        comm_time = sum(stats[k]["total"] for k in stats.keys() if "send" in k or "recv" in k)
 
         # Bubbles = total wall-clock time - active work time
         bubble_time = step_time - compute_time - comm_time

@@ -87,7 +87,8 @@ for step in range(STEPS):
         hidden = hidden.to(torch.cuda.device(1))
     # retain_grad() for inspection: in PP, this is what we'd send backward.
     # Without it, hidden.grad would be None.
-    hidden.retain_grad() # 中间张量 hidden 的梯度被保留
+    # hidden.retain_grad() # 中间张量 hidden 的梯度被保留
+    # hidden= hidden.detach() # 如果detach()后hidden的梯度为None, 则hidden.grad = None，将无法进行反向传播
     loss = part2(hidden, fixed_target)
     # --- BACKWARD PASS ---
     """
@@ -126,5 +127,6 @@ for step in range(STEPS):
 duration = time.time() - start_time
 print(f"Final Loss: {loss.item():.6f} | Time: {duration:.3f}s")
 """
+
 torchrun --nproc-per-node=2 src/manual.py
 """

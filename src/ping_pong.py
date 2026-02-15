@@ -14,7 +14,7 @@ def ping_pong():
     # torch.distributed.barrier() is mainly used to synchronize all processes,
     # forcing them to wait until each has reached the barrier; this effectively
     # makes async distributed code temporarily synchronous at that point.
-    torch.distributed.barrier()
+    torch.distributed.barrier() # 让异步的代码同步
     print(rank, world_size, device, os.getpid())
     comms = PipelineComms(rank, world_size)
 

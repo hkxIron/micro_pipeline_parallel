@@ -2,7 +2,8 @@ import torch.nn as nn
 
 
 class ShardedMLP(nn.Module):
-    def __init__(self, dim, total_layers, rank, world_size):
+    # NOTE: 当前rank上需要创建的layer
+    def __init__(self, dim:int, total_layers:int, rank:int, world_size:int):
         super().__init__()
         # 1. Calculate how many layers THIS GPU is responsible for
         layers_per_gpu = total_layers // world_size # 每个GPU负责多少层

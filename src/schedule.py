@@ -32,7 +32,7 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch:torch.Ten
         # Without this, the tensor would be treated as a constant by autograd and
         # input_data.grad would be set to None in backward(),
         # so earlier (upstream) model parameters wouldn’t update
-        input_data.requires_grad = True
+        input_data.requires_grad = True # NOTE: requires_grad=True, 使得input_data的梯度可以被计算出来
 
     # B. Compute
     # if you are not last, you just calculate activations
@@ -41,7 +41,8 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch:torch.Ten
 
     # C. Send data to the right, ie: send activations to the next rank
     if not model.is_last:
-        # NOTE: 注意，此处output.detach()会使detach()后的数据没有梯度, 即发送到下一个rank的数据里没有grad, 如需梯度，需要在receive后手动设置requires_grad=True
+        # NOTE: 注意，此处output.detach()会使detach()后的数据没有梯度, 即发送到下一个rank的数据里没有grad, 
+        # 如需梯度，需要在receive后手动设置requires_grad=True
         comms.send_forward(output.detach()) 
 
     # --- PHASE 2: BACKWARD PASS ---
@@ -51,7 +52,7 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch:torch.Ten
         loss = output
         # Scalar Backward: loss.backward() (Used only on the last GPU).
         # Non-Scalar Backward: output.backward(gradient) (Used on all previous GPUs).
-        loss.backward()  # This starts the chain reaction
+        loss.backward()  # This starts the chain reaction, 只累加梯度
     else:
         # Receive gradients coming from the right
         # whereas in the forward pass, we don't have the batch size unless we are the first device,
@@ -66,6 +67,7 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch:torch.Ten
         # This provided gradient acts as the starting point for the Vector-Jacobian Product,
         # allowing the chain rule to flow backward to the weights and the input.
         output.backward(grad_from_next)
+
     # 得到input_data的梯度
     grad_to_send = input_data.grad
     """
@@ -85,7 +87,7 @@ def naive_pipeline_step(model: ShardedMLP, comms: PipelineComms, batch:torch.Ten
 
 def gpipe_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targets, hidden_dim, chunk_num, device):
     """
-    先将所有的数据进行完全的前向，然后再一起进行反向
+    将数据分为micro-batch, 即先将所有的数据进行完全的前向，然后再一起进行反向, 好处是可以减少空泡率
 
     GPipe Schedule: FWD all chunks -> BWD all chunks.
     """
@@ -169,7 +171,7 @@ def gpipe_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targets,
 def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:torch.Tensor, targets, hidden_dim:int, chunk_num:int, device):
     """
     1F1B Schedule: Interleaves Forward and Backward passes.
-    交错进行前向和反向
+    交错进行前向和反向, 好处是即时释放activation，减少GPU内存peak memory的占用
     """
     # 1. Prepare Data Slices
     if comms.rank == 0:
@@ -179,9 +181,10 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
         micro_targets = targets.chunk(chunk_num)
 
     # Storage for "Phase 2"
+    # NOTE:对于每个rank上的每个micro_batch的数据，都需要保存input_data和output
     input_buffers = [None] * chunk_num # 每个micro_batch的输入数据
-    output_buffers = [None] * chunk_num
-    async_requests = []  # Keep request objects alive to prevent buffer deallocation
+    output_buffers = [None] * chunk_num # 每个micro_batch的输出数据, 即激活值或者loss
+    async_requests = []  # Keep request objects alive to prevent buffer deallocation, 异步通信均需要将request对象保存在列表中，以防止缓冲区被释放
 
     """
     注意：这里的warmup和cooldown的逻辑，是针对各rank上的gpu流水线是否饱和而言的，
@@ -190,8 +193,10 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
     # Schedule Logic
     # Rank 0 (First) has max warmup (needs to fill the whole pipe)
     # Rank N (Last) has 0 warmup (can backward immediately)
-    num_warmup = comms.world_size - comms.rank - 1 
-    num_1f1b = chunk_num - num_warmup
+    num_warmup = comms.world_size - comms.rank - 1  # 物理意义：即当前rank所在gpu后面的gpu的数量, 后面有多少个gpu, 则warmup几次
+    num_1f1b = chunk_num - num_warmup # chunk_num中减去num_warmup的数量，即可得到1f1b的chunk数量
+    # 同时，cooldown的次数与num_warmup的数量相同
+
     """
     若world_size=4, chunk_num=8, 所有的micro_batch总共会有8*2=16个前向+反向
         rank=0, 则num_warmup=4-0-1=3, num_1f1b=8-3=5
@@ -207,16 +212,16 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
     - 前向传播：激活值发送后，当前层可以继续处理下一个micro-batch，与下一层的计算可以并行
     - 反向传播：梯度必须按顺序传播，因为每个层的梯度计算依赖于后一层传回的梯度
     3. 代码中的具体实现
-        1 # 异步发送前向激活值（第221行）
+        1 # 异步发送前向激活值
         2 req: Optional[Work] = comms.isend_forward(output.detach())
         3 
-        4 # 同步接收前向数据（第208行） 
+        4 # 同步接收前向数据） 
         5 input_data = comms.recv_forward(shape, device)
         6 
-        7 # 同步接收反向梯度（第229行）
+        7 # 同步接收反向梯度
         8 grad_from_next = comms.recv_backward(output.shape, device)
         9 
-        10 # 同步发送反向梯度（第238行）
+        10 # 同步发送反向梯度
         11 comms.send_backward(input_data.grad)
     4. 设计原理
     - 最大化流水线利用率：通过异步发送前向激活值，可以让计算和通信重叠，减少流水线中的气泡（bubble）
@@ -241,8 +246,12 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
         else:
             output = model(input_data)
             # ASYNC SEND - returns immediately, doesn't block
-            # 异步发送至下一层layer
-            # 前向传播的异步发送：在1F1B调度中，前向传播阶段可以异步发送激活值给下一层，因为下一层可以立即开始计算，不需要等待当前层完成所有操作
+            # 
+            # NOTE: 异步发送前向数据至下一层layer
+            # 前向传播的异步发送：在1F1B调度图中，前向传播阶段可以异步发送激活值给下一层, 
+            # rank2向rank3发送mb2的前向激活值,rank3向rank2发送mb1的反向梯度， 因此rank2,rank3之间有死锁，
+            # 即两者都同时向对方发送, 不同的数据，都要对方同步式接收，而大家都是阻塞式发送，根本没有空闲去接收数据， 
+            # 导致产生死锁，所以需要异步发送
             req: Optional[Work] = comms.isend_forward(output.detach()) # 返回异步请求对象
             async_requests.append(req)  # Keep request alive to prevent buffer deallocation
 
@@ -255,8 +264,10 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
         output = output_buffers[micro_batch_idx]
 
         if comms.rank == comms.world_size - 1:
-            loss = output / chunk_num
-            loss.backward()
+            # NOTE: loss为何要除以chunk_num? 因为loss本身是在batch维度平均的，
+            # 然后在累加chunk_num次微批次数据的梯度，所以此处除以chunk_num
+            loss = output / chunk_num 
+            loss.backward() # NOTE: backward()会自动累加梯度,自动计算input_data.grad，但没有更新weights, 直到调用optimizer.step()才会更新weights, 一共累加了chunk_num次微批次数据的梯度
         else:
             grad_from_next: torch.Tensor = comms.recv_backward(output.shape, device)
             output.backward(grad_from_next)
@@ -272,6 +283,7 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
         total_loss: torch.Tensor = torch.zeros(1, device=device)
 
     """
+    world_size=4, chunk_num=8
     注意：在当前rank的GPU上进行前向与反向, 请参照1F1B Schedule的流水线图
     rank=0: num_warmup=3次前向 + num_1f1b=5次前向和反向 + num_warmup=3次反向
     对每个micro-batch展开有：
@@ -304,13 +316,14 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
 
     # Phase 2: Steady State (1F1B), 第二阶段进行交错的前向和反向传播
     for i in range(num_1f1b):
+        # 一次前向传播后马上进行一次反向传播
         run_forward(micro_batch_idx=i + num_warmup)
         # run_backward returns the loss (on last rank) or None (others)
         res = run_backward(micro_batch_idx=i)
         if comms.rank == comms.world_size - 1:
             total_loss += res
 
-    # Phase 3: Cooldown (Backward Only)
+    # Phase 3: Cooldown (Backward Only), 注意：backward only阶段只在非最后一个rank上进行,此时loss已经累加完成，此处无需累加loss
     for i in range(num_warmup):
         run_backward(micro_batch_idx=i + num_1f1b)
 

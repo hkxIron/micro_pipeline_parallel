@@ -64,7 +64,7 @@ if rank == 0:
 
 # 2. Initialize the Sharded Model
 # Each process only initializes its specific slice of layers
-# rank为全局的id
+# rank为全局的id, 计算当前rank上分配的model layer
 model: ShardedMLP = ShardedMLP(HIDDEN_DIM, TOTAL_LAYERS, rank, world_size).to(device)
 
 # 3. Setup Optimizer
@@ -74,6 +74,7 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # --- Data Generation ---
 # In Pipeline Parallelism, only Rank 0 loads the data.
+# NOTE:注意，这里的fix_input有时候是batch_data, 有时候是batch_size
 if rank == 0:
     # rank =0 加载数据, [batch, hidden_dim]
     fixed_input = torch.randn(BATCH_SIZE, HIDDEN_DIM).to(device)
@@ -110,7 +111,7 @@ for step in range(STEPS):
 
     # NOTE: 将当前rank的参数进行更新
     # Optimizer Step (All ranks do this locally after backward pass completes)
-    optimizer.step()
+    optimizer.step() # 更新权重
 
     # --- Logging ---
     # Only the last rank (who calculates loss) can print the loss value

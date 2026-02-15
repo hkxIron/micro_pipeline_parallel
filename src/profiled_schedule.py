@@ -16,7 +16,7 @@ def naive_pipeline_step(
 ):
     profiler.start_stage("step")
 
-    with profiler.time_block("forward_get_input"):
+    with profiler.time_block("forward_get_input"): # NOTE: 该方法用于记录时间
         if comms.rank == 0:
             input_data = batch
         else:
