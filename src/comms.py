@@ -89,8 +89,11 @@ def init_distributed():
 
 class PipelineComms:
     """
-    多个rank之间的通信类，形成一个通信队列
-    通信队列的结构是：rank0 -> rank1 -> rank2 -> ... -> rankN-1
+    多个rank之间的通信类，形成一个通信网络
+
+    通信队列的结构是：
+        前向：rank0 -> rank1 -> rank2 -> ... -> rankN-1
+        反向：rank0 <- rank1 <- rank2 <- ... <- rankN-1
 
     Args:
         rank (int): Rank of the current process. 即当前进程的rank，记住是分布式，不需要for循环

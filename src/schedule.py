@@ -181,7 +181,7 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
         micro_targets = targets.chunk(chunk_num)
 
     # Storage for "Phase 2"
-    # NOTE:对于每个rank上的每个micro_batch的数据，都需要保存input_data和output
+    # NOTE:对于每个rank上的每个micro_batch的数据，都需要保存每个micro_batch_idx 的input_data和output
     input_buffers = [None] * chunk_num # 每个micro_batch的输入数据
     output_buffers = [None] * chunk_num # 每个micro_batch的输出数据, 即激活值或者loss
     async_requests = []  # Keep request objects alive to prevent buffer deallocation, 异步通信均需要将request对象保存在列表中，以防止缓冲区被释放
@@ -248,10 +248,11 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
             # ASYNC SEND - returns immediately, doesn't block
             # 
             # NOTE: 异步发送前向数据至下一层layer
-            # 前向传播的异步发送：在1F1B调度图中，前向传播阶段可以异步发送激活值给下一层, 
+            # 前向传播的异步发送：结合pdf中的调度图，在1F1B调度图中，前向传播阶段可以异步发送激活值给下一层, 
             # rank2向rank3发送mb2的前向激活值,rank3向rank2发送mb1的反向梯度， 因此rank2,rank3之间有死锁，
             # 即两者都同时向对方发送, 不同的数据，都要对方同步式接收，而大家都是阻塞式发送，根本没有空闲去接收数据， 
             # 导致产生死锁，所以需要异步发送
+            # NOTE:各rank之间的前向发送是异步的，但各rank内的各micro_batch的的前向与反向是同步的，所以并不会产生数据错误，即使用的是旧数据
             req: Optional[Work] = comms.isend_forward(output.detach()) # 返回异步请求对象
             async_requests.append(req)  # Keep request alive to prevent buffer deallocation
 
@@ -265,7 +266,7 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
 
         if comms.rank == comms.world_size - 1:
             # NOTE: loss为何要除以chunk_num? 因为loss本身是在batch维度平均的，
-            # 然后在累加chunk_num次微批次数据的梯度，所以此处除以chunk_num
+            # 然后在累加chunk_num次微批次数据的梯度，所以此处除以chunk_num以恢复batch维度的平均
             loss = output / chunk_num 
             loss.backward() # NOTE: backward()会自动累加梯度,自动计算input_data.grad，但没有更新weights, 直到调用optimizer.step()才会更新weights, 一共累加了chunk_num次微批次数据的梯度
         else:
@@ -310,6 +311,7 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
         - 0次反向：
 
     """
+    # 必须按1F1B Schedule的顺序进行各micro_batch的前向与反向，否则会导致数据错误
     # Phase 1: Warmup (Forward Only), 第一阶段只进行前向传播，打满流水线
     for i in range(num_warmup):
         run_forward(micro_batch_idx=i)
@@ -323,7 +325,7 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
         if comms.rank == comms.world_size - 1:
             total_loss += res
 
-    # Phase 3: Cooldown (Backward Only), 注意：backward only阶段只在非最后一个rank上进行,此时loss已经累加完成，此处无需累加loss
+    # Phase 3: Cooldown (Backward Only), 注意：backward only阶段只在非末位rank上进行,此时loss已经累加完成，此处无需累加loss
     for i in range(num_warmup):
         run_backward(micro_batch_idx=i + num_1f1b)
 

@@ -100,14 +100,10 @@ for step in range(STEPS):
     if model.is_last:
         # 只有最后一层才需要计算loss
         # This function handles the Send/Recv/Compute orchestration
-        loss = one_forward_one_backward_pipeline_step(
-            model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device
-        )
+        loss = one_forward_one_backward_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device)
     else:
         # This GPU doesn't know the loss; it just finished its communication/compute cycle
-        one_forward_one_backward_pipeline_step(
-            model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device
-        )
+        one_forward_one_backward_pipeline_step(model, comms, fixed_input, fixed_target, HIDDEN_DIM, CHUNKS, device)
 
     # NOTE: 将当前rank的参数进行更新
     # Optimizer Step (All ranks do this locally after backward pass completes)
