@@ -54,9 +54,7 @@ torch.manual_seed(42)
 # Rough approximation: advance RNG state by rank * layers_per_rank * params_per_layer
 # nn.Linear initialization uses a more complex pattern (Kaiming/He initialization
 # typically samples from a normal distribution with specific parameters).
-for i in range(
-    rank * (TOTAL_LAYERS // world_size) * 2
-):  # 2 params per layer (weight, bias)
+for i in range(rank * (TOTAL_LAYERS // world_size) * 2):  # 2 params per layer (weight, bias)
     torch.randn(1)  # Consume RNG state
 
 if rank == 0:

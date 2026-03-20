@@ -184,6 +184,7 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
     # NOTE:对于每个rank上的每个micro_batch的数据，都需要保存每个micro_batch_idx 的input_data和output
     input_buffers = [None] * chunk_num # 每个micro_batch的输入数据
     output_buffers = [None] * chunk_num # 每个micro_batch的输出数据, 即激活值或者loss
+    # 这是整个任务全局对象，因此只有任务结束后，才会释放，所以可以用来跟踪每个micro_batch的通信状态
     async_requests = []  # Keep request objects alive to prevent buffer deallocation, 异步通信均需要将request对象保存在列表中，以防止缓冲区被释放
 
     """
@@ -253,6 +254,85 @@ def one_forward_one_backward_pipeline_step(model, comms:PipelineComms, batch:tor
             # 即两者都同时向对方发送, 不同的数据，都要对方同步式接收，而大家都是阻塞式发送，根本没有空闲去接收数据， 
             # 导致产生死锁，所以需要异步发送
             # NOTE:各rank之间的前向发送是异步的，但各rank内的各micro_batch的的前向与反向是同步的，所以并不会产生数据错误，即使用的是旧数据
+            """
+            上面是一段1F1B的代码，解释一下为何需要异步发送isend_forward，另外，isend_forward如何保证rank之间发送与接收的数据不会产生micro_batch_idx错乱？
+            
+            这段 1F1B（One Forward One Backward）的代码写得非常标准，注释也非常精彩！你提出的两个问题直击流水线并行（Pipeline Parallelism）中最核心的**死锁（Deadlock）**和**时序（Synchronization）**问题。
+
+            我们分两部分来详细解答：
+
+            ---
+
+            ### 问题一：为什么必须使用异步发送 `isend_forward`？
+
+            在之前的 GPipe 代码中，前向和反向是完全分开的（先做完所有 Forward，再做所有 Backward），所以用同步的 `send` 没问题。但在 1F1B 调度中，**如果不使用异步发送，必然会导致死锁（Deadlock）。**
+
+            我们来看 1F1B 的**第二阶段（Steady State）**，此时前向和反向是交错进行的。假设我们有 Rank 1 和 Rank 2，它们进入了 1F1B 阶段：
+
+            **如果全部使用同步 `send`，会发生什么？**
+            1. **Rank 1** 执行 `run_forward`，计算完后，调用同步的 `dist.send(前向激活值)` 给 Rank 2。
+            * *注意：同步 `send` 会阻塞，直到 Rank 2 调用了 `recv` 接收这些数据，Rank 1 才能往下走。*
+            2. **与此同时，Rank 2** 刚好执行完了 `run_backward`，它需要把梯度传回给 Rank 1，于是调用同步的 `dist.send(反向梯度)` 给 Rank 1。
+            * *注意：同步 `send` 也会阻塞，直到 Rank 1 调用了 `recv` 接收这些梯度，Rank 2 才能往下走。*
+
+            **死锁诞生了：**
+            * Rank 1 举着“前向激活值”，死死等待 Rank 2 来接收。
+            * Rank 2 举着“反向梯度”，死死等待 Rank 1 来接收。
+            * 双方都在等对方先腾出手来（调用 `recv`），结果谁也无法执行到下一行代码，整个训练程序卡死。
+
+            **`isend_forward` 如何破局？**
+            使用 `isend`（异步发送）打破了这个循环等待：
+            1. **Rank 1** 计算完前向后，调用 `dist.isend(前向激活值)`。这相当于 Rank 1 把数据交给了底层的快递员（NCCL/网络硬件），**然后立刻返回，不等待 Rank 2 接收**。
+            2. Rank 1 马上往下执行，进入 `run_backward`，并调用 `recv_backward`。
+            3. 此时，Rank 2 正在调用 `send_backward` 发送梯度。因为 Rank 1 已经准备好 `recv_backward` 了，所以反向梯度的通信顺利完成！
+            4. 随后，Rank 2 进入下一个循环的 `run_forward`，调用 `recv_forward`，正好接住了刚才 Rank 1 异步发过来的前向激活值。
+
+            **总结：** 异步发送前向数据，是为了让当前 GPU 的 CPU 线程不被阻塞，能够赶紧往下走去接收反向梯度，从而**打破交叉通信带来的死锁**。同时，这也实现了通信与计算的重叠（Overlap），提升了性能。
+
+            ---
+
+            ### 问题二：`isend_forward` 如何保证 `micro_batch_idx` 不会错乱？
+
+            你可能会担心：既然是异步发送，CPU 瞬间把好几个 micro_batch 的发送指令都扔出去了，网络会不会把顺序搞乱？Rank 2 接收时会不会把 MB_1 当成了 MB_0？
+
+            答案是：**绝对不会。底层网络严格保证了 FIFO（先进先出）。**
+
+            这与之前 GPipe 的原理是一脉相承的，即使变成了异步（Async），FIFO 的铁律依然生效：
+
+            #### 1. 异步只是 CPU 不等，但网络队列是严格排队的
+            当你调用 `dist.isend(tensor)` 时，PyTorch 只是把这个发送任务**按顺序**压入了底层通信引擎（如 NCCL）的指令队列中。
+            * 第一次调用 `run_forward(0)` -> 压入发送 MB_0 的指令。
+            * 第二次调用 `run_forward(1)` -> 压入发送 MB_1 的指令。
+
+            NCCL 在处理这两个 Rank 之间的点对点通信时，是一条单行道。**先压入队列的指令，必定先在物理网络中传输；先在网络中传输的数据，必定先到达接收端。**
+
+            #### 2. 发送端和接收端的循环顺序完美契合
+            我们来看看代码中 `micro_batch_idx` 的生成顺序。无论是 Warmup 阶段还是 1F1B 阶段，`run_forward(micro_batch_idx)` 的调用顺序在所有 Rank 上都是严格递增的：
+            * `micro_batch_idx` 的执行顺序永远是：`0, 1, 2, 3, 4, 5, 6, 7`。
+
+            **Rank 0 的发送顺序：**
+            异步发送 MB_0 -> 异步发送 MB_1 -> 异步发送 MB_2 ...
+
+            **Rank 1 的接收顺序：**
+            同步接收第 1 个到达的数据（赋给 MB_0） -> 同步接收第 2 个到达的数据（赋给 MB_1）...
+
+            因为发送端是按 `0, 1, 2...` 的顺序塞入网络管道的，接收端也是按 `0, 1, 2...` 的顺序从管道里往外拿的。管道本身不能超车（FIFO），所以数据绝对是一一对应的，不需要任何 `tag` 来标识。
+
+            ---
+
+            ### 💡 代码中的一个神来之笔：`async_requests`
+
+            在你的代码中，有一行非常关键，体现了极高的工程素养：
+            ```python
+            req: Optional[Work] = comms.isend_forward(output.detach())
+            async_requests.append(req)  # Keep request alive to prevent buffer deallocation
+            ```
+            **为什么要把它 append 到一个列表里？**
+            因为 `isend` 是异步的！当 `isend` 函数返回时，数据**可能还没有真正发送到网络上**，它还在当前 GPU 的显存（`output` tensor）里。
+            如果在 Python 层面，这个 `output` 变量的生命周期结束了（比如被垃圾回收了，或者显存被复用了），而底层的网卡还没来得及把数据发出去，网卡就会读到**被污染的脏数据**，甚至导致段错误（Segfault）。
+
+            把 `req` 保存到 `async_requests` 列表中，就相当于告诉 PyTorch：“这个异步任务还没结束，请你死死保住这块显存，千万别回收！”直到整个训练 step 结束，这些请求才会被释放，从而保证了异步通信的绝对安全。
+            """
             req: Optional[Work] = comms.isend_forward(output.detach()) # 返回异步请求对象
             async_requests.append(req)  # Keep request alive to prevent buffer deallocation
 
